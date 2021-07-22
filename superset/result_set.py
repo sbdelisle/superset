@@ -71,6 +71,29 @@ def destringify(obj: str) -> Any:
     return json.loads(obj)
 
 
+def get_types_from_cursor_description(cursor_description):
+    type_mapping = {
+        "Nullable(DateTime64)": pa.timestamp("ms"),
+        "DateTime64": pa.timestamp("ms"),
+        "Nullable(DateTime)": pa.timestamp("s"),
+        "DateTime": pa.timestamp("s"),
+        "Nullable(UInt8)": pa.uint8(),
+        "Nullable(UInt32)": pa.uint32(),
+        "Nullable(UInt64)": pa.uint64(),
+        "Nullable(Int8)": pa.int8(),
+        "Nullable(Int32)": pa.int32(),
+        "Nullable(Int64)": pa.int64(),
+        "Nullable(Float64)": pa.float64(),
+        "String": pa.string(),
+    }
+
+    if cursor_description:
+        output = {c[0]: type_mapping[c[1]] for c in cursor_description if c[1] in type_mapping}
+    else:
+        output = {}
+    return output
+
+
 class SupersetResultSet:
     def __init__(  # pylint: disable=too-many-locals
         self,
@@ -99,14 +122,18 @@ class SupersetResultSet:
             # generate numpy structured array dtype
             numpy_dtype = [(column_name, "object") for column_name in column_names]
 
+        types_from_cursor_description = get_types_from_cursor_description(cursor_description)
+
         # only do expensive recasting if datatype is not standard list of tuples
         if data and (not isinstance(data, list) or not isinstance(data[0], tuple)):
             data = [tuple(row) for row in data]
         array = np.array(data, dtype=numpy_dtype)
         if array.size > 0:
             for column in column_names:
+                column_type = types_from_cursor_description.get(column)
+                type_arg = {} if column_type is None else {"type": column_type}
                 try:
-                    pa_data.append(pa.array(array[column].tolist()))
+                    pa_data.append(pa.array(array[column].tolist(), **type_arg))
                 except (
                     pa.lib.ArrowInvalid,
                     pa.lib.ArrowTypeError,
@@ -136,9 +163,7 @@ class SupersetResultSet:
                         try:
                             if sample.tzinfo:
                                 tz = sample.tzinfo
-                                series = pd.Series(
-                                    array[column], dtype="datetime64[ns]"
-                                )
+                                series = pd.Series(array[column], dtype="datetime64[ns]")
                                 series = pd.to_datetime(series).dt.tz_localize(tz)
                                 pa_data[i] = pa.Array.from_pandas(
                                     series, type=pa.timestamp("ns", tz=tz)
